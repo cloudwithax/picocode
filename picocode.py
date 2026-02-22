@@ -822,6 +822,7 @@ def call_api_stream(messages, tools):
 
     text_parts = []
     tool_calls_by_idx = {}
+    reasoning_parts = []  # For models with thinking/reasoning
     started_text = False
     first_token = True
     renderer = MarkdownRenderer()
@@ -841,9 +842,13 @@ def call_api_stream(messages, tools):
         delta = choices[0].get("delta", {})
 
         # stop throbber on first meaningful delta
-        if first_token and (delta.get("content") or delta.get("tool_calls")):
+        if first_token and (delta.get("content") or delta.get("tool_calls") or delta.get("reasoning_content")):
             throbber.stop()
             first_token = False
+
+        # accumulate reasoning content (for thinking models)
+        if delta.get("reasoning_content"):
+            reasoning_parts.append(delta["reasoning_content"])
 
         # stream text content
         if delta.get("content"):
@@ -881,6 +886,8 @@ def call_api_stream(messages, tools):
     message = {}
     if text_parts:
         message["content"] = "".join(text_parts)
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
     if tool_calls_by_idx:
         message["tool_calls"] = [
             tool_calls_by_idx[i] for i in sorted(tool_calls_by_idx)
@@ -947,10 +954,13 @@ def _run_subagent(task, system_prompt, depth=0, name="Subagent"):
             message = call_api_sync(messages, tools)
             text_content = message.get("content") or ""
             tool_calls = message.get("tool_calls") or []
+            reasoning_content = message.get("reasoning_content") or ""
 
             assistant_msg = {"role": "assistant"}
             if text_content:
                 assistant_msg["content"] = text_content
+            if reasoning_content:
+                assistant_msg["reasoning_content"] = reasoning_content
             if tool_calls:
                 assistant_msg["tool_calls"] = tool_calls  # type: ignore[assignment]
             messages.append(assistant_msg)
@@ -1238,6 +1248,7 @@ def main():
                 message = call_api_stream(messages, tools)
                 text_content = message.get("content") or ""
                 tool_calls = message.get("tool_calls") or []
+                reasoning_content = message.get("reasoning_content") or ""
 
                 # Execute tool calls in parallel
                 with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
@@ -1248,6 +1259,8 @@ def main():
                 assistant_msg = {"role": "assistant"}
                 if text_content:
                     assistant_msg["content"] = text_content
+                if reasoning_content:
+                    assistant_msg["reasoning_content"] = reasoning_content
                 if tool_calls:
                     assistant_msg["tool_calls"] = tool_calls  # type: ignore[assignment]
                 messages.append(assistant_msg)
