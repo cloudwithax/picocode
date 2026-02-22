@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """picocode - minimal and feature complete openai-compatible coding assistant derived from nanocode"""
 
-import atexit, concurrent.futures, glob as globlib, html as html_lib, json, os, re, ssl, subprocess, sys, threading, time, urllib.parse, urllib.request, urllib.error
+import atexit, concurrent.futures, glob as globlib, html as html_lib, json, os, platform, re, ssl, subprocess, sys, threading, time, urllib.parse, urllib.request, urllib.error, uuid
 
 # Try to import readline (may not be available on all systems)
 try:
@@ -25,6 +25,161 @@ OPENAI_KEY = os.environ.get("OPENAI_API_KEY")
 API_URL = os.environ.get("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions")
 MODEL = os.environ.get("MODEL", "gpt-4o")
 RPM_LIMIT = int(os.environ.get("RPM_LIMIT", "40"))
+PROVIDER = os.environ.get("PROVIDER", "openai")
+
+# --- Kimi OAuth ---
+
+KIMI_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
+KIMI_AUTH_URL = os.environ.get("KIMI_AUTH_URL", "https://auth.kimi.com")
+KIMI_API_BASE = "https://api.kimi.com/coding/v1"
+_KIMI_TOKEN_FILE = os.path.join(os.path.expanduser("~"), ".picocode_kimi.json")
+_KIMI_DEVICE_ID_FILE = os.path.join(os.path.expanduser("~"), ".picocode_device_id")
+
+KIMI_USER_AGENT = "KimiCLI/1.6.3"
+
+if PROVIDER == "kimi":
+    API_URL = os.environ.get("OPENAI_API_URL", f"{KIMI_API_BASE}/chat/completions")
+    MODEL = os.environ.get("MODEL", "kimi-k2")
+
+
+def _get_device_id():
+    if os.path.exists(_KIMI_DEVICE_ID_FILE):
+        return open(_KIMI_DEVICE_ID_FILE).read().strip()
+    did = str(uuid.uuid4())
+    with open(_KIMI_DEVICE_ID_FILE, "w") as f:
+        f.write(did)
+    return did
+
+
+def _kimi_device_headers():
+    return {
+        "X-Msh-Platform": "kimi_cli",
+        "X-Msh-Device-Name": platform.node(),
+        "X-Msh-Device-Model": f"{platform.system()} {platform.release()} {platform.machine()}",
+        "X-Msh-Os-Version": platform.version(),
+        "X-Msh-Device-Id": _get_device_id(),
+    }
+
+
+def _save_kimi_tokens(tokens):
+    with open(_KIMI_TOKEN_FILE, "w") as f:
+        json.dump(tokens, f)
+    os.chmod(_KIMI_TOKEN_FILE, 0o600)
+
+
+def _load_kimi_tokens():
+    if not os.path.exists(_KIMI_TOKEN_FILE):
+        return None
+    with open(_KIMI_TOKEN_FILE) as f:
+        return json.load(f)
+
+
+def _refresh_kimi_token(tokens):
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        **_kimi_device_headers(),
+    }
+    data = urllib.parse.urlencode(
+        {
+            "client_id": KIMI_CLIENT_ID,
+            "grant_type": "refresh_token",
+            "refresh_token": tokens["refresh_token"],
+        }
+    ).encode()
+    req = urllib.request.Request(
+        f"{KIMI_AUTH_URL}/api/oauth/token", data=data, headers=headers
+    )
+    try:
+        resp = json.loads(urllib.request.urlopen(req).read().decode())
+        resp["expires_at"] = time.time() + resp.get("expires_in", 3600)
+        _save_kimi_tokens(resp)
+        return resp
+    except Exception:
+        return None
+
+
+def _get_kimi_access_token():
+    tokens = _load_kimi_tokens()
+    if not tokens:
+        return None
+    if tokens.get("expires_at", 0) - time.time() < 300:
+        tokens = _refresh_kimi_token(tokens)
+    return tokens["access_token"] if tokens else None
+
+
+def kimi_login():
+    """OAuth 2.0 Device Flow for Kimi."""
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        **_kimi_device_headers(),
+    }
+    data = urllib.parse.urlencode({"client_id": KIMI_CLIENT_ID}).encode()
+    req = urllib.request.Request(
+        f"{KIMI_AUTH_URL}/api/oauth/device_authorization", data=data, headers=headers
+    )
+    try:
+        resp = json.loads(urllib.request.urlopen(req).read().decode())
+    except Exception as e:
+        print(f"{RED}⏺ Failed to start login: {e}{RESET}")
+        return False
+
+    print(f"\n{BOLD}Open this URL to login:{RESET}")
+    print(f"  {CYAN}{resp['verification_uri_complete']}{RESET}")
+    print(f"  Code: {BOLD}{resp['user_code']}{RESET}\n")
+
+    try:
+        import webbrowser
+
+        webbrowser.open(resp["verification_uri_complete"])
+    except Exception:
+        pass
+
+    interval = resp.get("interval", 5)
+    device_code = resp["device_code"]
+    print(f"{DIM}Waiting for authorization...{RESET}", flush=True)
+
+    while True:
+        time.sleep(interval)
+        token_data = urllib.parse.urlencode(
+            {
+                "client_id": KIMI_CLIENT_ID,
+                "device_code": device_code,
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            }
+        ).encode()
+        token_req = urllib.request.Request(
+            f"{KIMI_AUTH_URL}/api/oauth/token", data=token_data, headers=headers
+        )
+        try:
+            token_resp = json.loads(urllib.request.urlopen(token_req).read().decode())
+            if "access_token" in token_resp:
+                token_resp["expires_at"] = time.time() + token_resp.get(
+                    "expires_in", 3600
+                )
+                _save_kimi_tokens(token_resp)
+                print(f"{GREEN}⏺ Logged in to Kimi!{RESET}")
+                return True
+        except urllib.error.HTTPError as e:
+            body = json.loads(e.read().decode())
+            err = body.get("error", "")
+            if err == "authorization_pending":
+                continue
+            elif err == "slow_down":
+                interval += 5
+                continue
+            else:
+                print(
+                    f"{RED}⏺ Login failed: {body.get('error_description', err)}{RESET}"
+                )
+                return False
+
+
+def _get_api_key():
+    if PROVIDER == "kimi":
+        token = _get_kimi_access_token()
+        if token:
+            return token
+    return OPENAI_KEY
 
 # ANSI colors
 RESET, BOLD, DIM, ITALIC, STRIKETHROUGH, UNDERLINE = (
@@ -443,11 +598,62 @@ def make_schema(exclude=()):
 CONTEXT_LIMIT = 200000
 RESERVED_TOKENS = 8192
 MAX_INPUT_TOKENS = CONTEXT_LIMIT - RESERVED_TOKENS
+COMPACTION_THRESHOLD = 0.75  # Trigger compaction at 75% of context limit
+COMPACTION_KEEP_RECENT = 10  # Keep this many recent messages unsummarized
 
 
 def estimate_tokens(text):
     """Rough token estimation: ~4 chars per token"""
     return len(text) // 4
+
+
+def _compact_messages(messages):
+    """Summarize old messages to reduce context size while preserving key information."""
+    if len(messages) <= 2:
+        return messages
+
+    # Separate system prompt
+    system_msg = messages[0] if messages[0].get("role") == "system" else None
+    conversation = messages[1:] if system_msg else messages[:]
+
+    if len(conversation) <= COMPACTION_KEEP_RECENT:
+        return messages
+
+    # Messages to compact (all but recent ones)
+    to_compact = conversation[:-COMPACTION_KEEP_RECENT]
+    recent = conversation[-COMPACTION_KEEP_RECENT:]
+
+    if not to_compact:
+        return messages
+
+    # Build summary of old messages
+    summary_parts = []
+    for msg in to_compact:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        if msg.get("tool_calls"):
+            tool_names = [tc["function"]["name"] for tc in msg["tool_calls"]]
+            summary_parts.append(f"[{role}: used tools {', '.join(tool_names)}]")
+        elif msg.get("role") == "tool":
+            summary_parts.append(f"[tool result: {content[:100]}...]")
+        elif content:
+            preview = content[:200] + "..." if len(content) > 200 else content
+            summary_parts.append(f"[{role}: {preview}]")
+
+    summary_text = "\n".join(summary_parts)
+
+    # Create compacted summary message
+    compacted_msg = {
+        "role": "user",
+        "content": f"[CONTEXT SUMMARY - Earlier conversation compacted]\n{summary_text}\n[END SUMMARY - Continue from here]",
+    }
+
+    # Rebuild messages
+    result = [system_msg] if system_msg else []
+    result.append(compacted_msg)
+    result.extend(recent)
+
+    return result
 
 
 def trim_messages(messages, max_tokens=MAX_INPUT_TOKENS):
@@ -476,6 +682,28 @@ def trim_messages(messages, max_tokens=MAX_INPUT_TOKENS):
         recent.insert(0, msg)
 
     return system_msg + recent
+
+
+def auto_compact_if_needed(messages):
+    """Check if compaction is needed and perform it. Returns (messages, compacted)."""
+    if not messages:
+        return messages, False
+
+    total = sum(estimate_tokens(json.dumps(m)) for m in messages)
+    threshold_tokens = int(MAX_INPUT_TOKENS * COMPACTION_THRESHOLD)
+
+    if total < threshold_tokens:
+        return messages, False
+
+    # Perform compaction
+    compacted = _compact_messages(messages)
+    new_total = sum(estimate_tokens(json.dumps(m)) for m in compacted)
+
+    # Only return compacted if it actually reduced size
+    if new_total < total:
+        return compacted, True
+
+    return messages, False
 
 
 class Throbber:
@@ -568,13 +796,14 @@ def call_api_stream(messages, tools):
     }
     for attempt in range(5):
         _rpm_wait()
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {_get_api_key()}",
+        }
+        if PROVIDER == "kimi":
+            headers["User-Agent"] = KIMI_USER_AGENT
         request = urllib.request.Request(
-            API_URL,
-            data=json.dumps(payload).encode(),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {OPENAI_KEY}",
-            },
+            API_URL, data=json.dumps(payload).encode(), headers=headers
         )
         throbber = Throbber()
         throbber.start()
@@ -599,9 +828,10 @@ def call_api_stream(messages, tools):
 
     for raw_line in response:
         line = raw_line.decode("utf-8", errors="ignore").strip()
-        if not line.startswith("data: "):
+        # Handle both "data:" and "data: " prefixes (Kimi uses "data:" without space)
+        if not line.startswith("data:"):
             continue
-        data = line[6:]
+        data = line[5:].lstrip()  # strip "data:" and any leading space
         if data == "[DONE]":
             break
         chunk = json.loads(data)
@@ -666,13 +896,14 @@ def call_api_sync(messages, tools):
     payload = {"model": MODEL, "max_tokens": 8192, "messages": messages, "tools": tools}
     for attempt in range(5):
         _rpm_wait()
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {_get_api_key()}",
+        }
+        if PROVIDER == "kimi":
+            headers["User-Agent"] = KIMI_USER_AGENT
         req = urllib.request.Request(
-            API_URL,
-            data=json.dumps(payload).encode(),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {OPENAI_KEY}",
-            },
+            API_URL, data=json.dumps(payload).encode(), headers=headers
         )
         try:
             resp = urllib.request.urlopen(req)
@@ -710,6 +941,8 @@ def _run_subagent(task, system_prompt, depth=0, name="Subagent"):
                 _subagent_display[sid]["action"] = "thinking..."
                 _redraw_subagents()
 
+            # Auto-compact if context is getting large
+            messages, _ = auto_compact_if_needed(messages)
             messages = trim_messages(messages)
             message = call_api_sync(messages, tools)
             text_content = message.get("content") or ""
@@ -961,7 +1194,10 @@ def main():
 
         atexit.register(_save_history)
 
-    print(f"{BOLD}picocode{RESET} | {DIM}{MODEL} (OpenAI) | {os.getcwd()}{RESET}\n")
+    provider_label = "Kimi" if PROVIDER == "kimi" else "OpenAI"
+    print(f"{BOLD}picocode{RESET} | {DIM}{MODEL} ({provider_label}) | {os.getcwd()}{RESET}\n")
+    if PROVIDER == "kimi" and not _load_kimi_tokens():
+        print(f"{YELLOW}⏺ Not logged in to Kimi. Use /login to authenticate.{RESET}\n")
     messages = [
         {"role": "system", "content": f"Concise coding assistant. cwd: {os.getcwd()}"}
     ]
@@ -975,6 +1211,9 @@ def main():
                 continue
             if user_input in ("/q", "exit"):
                 break
+            if user_input == "/login":
+                kimi_login()
+                continue
             if user_input == "/c":
                 messages = [
                     {
@@ -986,6 +1225,11 @@ def main():
                 continue
 
             messages.append({"role": "user", "content": user_input})
+
+            # Auto-compact if context is getting large
+            messages, was_compacted = auto_compact_if_needed(messages)
+            if was_compacted:
+                print(f"{YELLOW}⏺ Context compacted to preserve key information{RESET}")
 
             # agentic loop: keep calling API until no more tool calls
             while True:
