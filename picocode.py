@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """picocode - minimal and feature complete openai-compatible coding assistant derived from nanocode"""
 
-import atexit, concurrent.futures, glob as globlib, html as html_lib, json, os, re, readline, ssl, subprocess, sys, threading, time, urllib.parse, urllib.request, urllib.error
+import atexit, concurrent.futures, glob as globlib, html as html_lib, json, os, re, ssl, subprocess, sys, threading, time, urllib.parse, urllib.request, urllib.error
+
+# Try to import readline (may not be available on all systems)
+try:
+    import readline
+
+    _has_readline = True
+except ImportError:
+    _has_readline = False
 
 # Load .env file if present
 env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -20,10 +28,20 @@ RPM_LIMIT = int(os.environ.get("RPM_LIMIT", "40"))
 
 # ANSI colors
 RESET, BOLD, DIM, ITALIC, STRIKETHROUGH, UNDERLINE = (
-    "\033[0m", "\033[1m", "\033[2m", "\033[3m", "\033[9m", "\033[4m",
+    "\033[0m",
+    "\033[1m",
+    "\033[2m",
+    "\033[3m",
+    "\033[9m",
+    "\033[4m",
 )
 BLUE, CYAN, GREEN, YELLOW, RED, MAGENTA = (
-    "\033[34m", "\033[36m", "\033[32m", "\033[33m", "\033[31m", "\033[35m",
+    "\033[34m",
+    "\033[36m",
+    "\033[32m",
+    "\033[33m",
+    "\033[31m",
+    "\033[35m",
 )
 
 _print_lock = threading.Lock()
@@ -110,10 +128,13 @@ def _rpm_wait():
                 _rpm_timestamps.append(now)
                 return
             wait = 60 - (now - _rpm_timestamps[0])
-        is_sub = getattr(_in_subagent, 'active', False)
+        is_sub = getattr(_in_subagent, "active", False)
         if not is_sub:
             with _print_lock:
-                print(f"  {DIM}⏳ rate limit ({RPM_LIMIT} rpm), waiting {wait:.1f}s...{RESET}", flush=True)
+                print(
+                    f"  {DIM}⏳ rate limit ({RPM_LIMIT} rpm), waiting {wait:.1f}s...{RESET}",
+                    flush=True,
+                )
         time.sleep(wait)
 
 
@@ -124,10 +145,12 @@ def _rpm_backoff(retry_after=None):
         # fill the window so every thread hitting _rpm_wait blocks too
         now = time.monotonic()
         _rpm_timestamps[:] = [now] * RPM_LIMIT
-    is_sub = getattr(_in_subagent, 'active', False)
+    is_sub = getattr(_in_subagent, "active", False)
     if not is_sub:
         with _print_lock:
-            print(f"  {DIM}⏳ 429 from API, backing off {wait:.1f}s...{RESET}", flush=True)
+            print(
+                f"  {DIM}⏳ 429 from API, backing off {wait:.1f}s...{RESET}", flush=True
+            )
     time.sleep(wait)
 
 
@@ -207,7 +230,9 @@ def search(args):
 
     # Parse results - look for result-link pattern
     results = []
-    result_pattern = re.compile(r"<a rel=\"nofollow\" href=\"([^\"]+)\" class=.result-link.>([^<]+)</a>")
+    result_pattern = re.compile(
+        r"<a rel=\"nofollow\" href=\"([^\"]+)\" class=.result-link.>([^<]+)</a>"
+    )
 
     for match in result_pattern.finditer(html_text):
         # Extract URL from redirect
@@ -221,12 +246,9 @@ def search(args):
         parsed_url = urllib.parse.urlparse(actual_url)
         source = parsed_url.netloc
 
-        results.append({
-            "url": actual_url,
-            "title": title,
-            "description": "",
-            "source": source
-        })
+        results.append(
+            {"url": actual_url, "title": title, "description": "", "source": source}
+        )
 
         if len(results) >= 10:
             break
@@ -272,8 +294,12 @@ def fetch(args):
     # If HTML, strip tags and extract text
     if "<html" in content.lower() or "<!doctype" in content.lower():
         # Remove script and style elements
-        content = re.sub(r"<script[^>]*>.*?</script>", "", content, flags=re.DOTALL | re.IGNORECASE)
-        content = re.sub(r"<style[^>]*>.*?</style>", "", content, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(
+            r"<script[^>]*>.*?</script>", "", content, flags=re.DOTALL | re.IGNORECASE
+        )
+        content = re.sub(
+            r"<style[^>]*>.*?</style>", "", content, flags=re.DOTALL | re.IGNORECASE
+        )
         # Remove HTML tags
         content = re.sub(r"<[^>]+>", " ", content)
         # Decode HTML entities
@@ -300,11 +326,11 @@ def bash(args):
     output_lines = []
     try:
         while True:
-            line = proc.stdout.readline()
+            line = proc.stdout.readline()  # type: ignore[union-attr]
             if not line and proc.poll() is not None:
                 break
             if line:
-                if not getattr(_in_subagent, 'active', False):
+                if not getattr(_in_subagent, "active", False):
                     print(f"  {DIM}│ {line.rstrip()}{RESET}", flush=True)
                 output_lines.append(line)
         proc.wait(timeout=30)
@@ -315,7 +341,9 @@ def bash(args):
 
 
 def subagent(args):
-    return _run_subagent(args["task"], args["system_prompt"], name=args.get("name", "Subagent"))
+    return _run_subagent(
+        args["task"], args["system_prompt"], name=args.get("name", "Subagent")
+    )
 
 
 # --- Tool definitions: (description, schema, function) ---
@@ -413,7 +441,7 @@ def make_schema(exclude=()):
 
 
 CONTEXT_LIMIT = 200000
-RESERVED_TOKENS = 8192 
+RESERVED_TOKENS = 8192
 MAX_INPUT_TOKENS = CONTEXT_LIMIT - RESERVED_TOKENS
 
 
@@ -434,7 +462,9 @@ def trim_messages(messages, max_tokens=MAX_INPUT_TOKENS):
         return messages
 
     # Keep system prompt
-    system_prompt = messages[0]["content"] if messages[0].get("role") == "system" else ""
+    system_prompt = (
+        messages[0]["content"] if messages[0].get("role") == "system" else ""
+    )
     system_msg = [{"role": "system", "content": system_prompt}] if system_prompt else []
 
     # Keep recent messages (working backwards)
@@ -450,6 +480,7 @@ def trim_messages(messages, max_tokens=MAX_INPUT_TOKENS):
 
 class Throbber:
     """Animated spinner with cycling whimsical status messages."""
+
     FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     MUSINGS = [
         "Thinking...",
@@ -483,6 +514,7 @@ class Throbber:
 
     def _spin(self):
         import random
+
         i = 0
         msg_idx = 0
         last_switch = time.monotonic()
@@ -593,7 +625,7 @@ def call_api_stream(messages, tools):
             text_parts.append(delta["content"])
 
         # accumulate tool calls
-        for tc in (delta.get("tool_calls") or []):
+        for tc in delta.get("tool_calls") or []:
             idx = tc["index"]
             if idx not in tool_calls_by_idx:
                 tool_calls_by_idx[idx] = {
@@ -620,7 +652,9 @@ def call_api_stream(messages, tools):
     if text_parts:
         message["content"] = "".join(text_parts)
     if tool_calls_by_idx:
-        message["tool_calls"] = [tool_calls_by_idx[i] for i in sorted(tool_calls_by_idx)]
+        message["tool_calls"] = [
+            tool_calls_by_idx[i] for i in sorted(tool_calls_by_idx)
+        ]
     return message
 
 
@@ -635,7 +669,10 @@ def call_api_sync(messages, tools):
         req = urllib.request.Request(
             API_URL,
             data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {OPENAI_KEY}"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {OPENAI_KEY}",
+            },
         )
         try:
             resp = urllib.request.urlopen(req)
@@ -659,7 +696,10 @@ def _run_subagent(task, system_prompt, depth=0, name="Subagent"):
         _subagent_display[sid] = {"name": name, "action": "spawning..."}
         _redraw_subagents()
 
-    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": task}]
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": task},
+    ]
     exclude = ["subagent"] if depth >= MAX_SUBAGENT_DEPTH else []
     tools = make_schema(exclude=exclude)
     text_content = ""
@@ -679,7 +719,7 @@ def _run_subagent(task, system_prompt, depth=0, name="Subagent"):
             if text_content:
                 assistant_msg["content"] = text_content
             if tool_calls:
-                assistant_msg["tool_calls"] = tool_calls
+                assistant_msg["tool_calls"] = tool_calls  # type: ignore[assignment]
             messages.append(assistant_msg)
 
             if not tool_calls:
@@ -696,16 +736,20 @@ def _run_subagent(task, system_prompt, depth=0, name="Subagent"):
                     _redraw_subagents()
 
                 if fn_name == "subagent":
-                    result = _run_subagent(fn_args["task"], fn_args["system_prompt"], depth + 1)
+                    result = _run_subagent(
+                        fn_args["task"], fn_args["system_prompt"], depth + 1
+                    )
                 else:
                     result = run_tool(fn_name, fn_args)
 
-                messages.append({
-                    "tool_call_id": call["id"],
-                    "role": "tool",
-                    "name": fn_name,
-                    "content": result,
-                })
+                messages.append(
+                    {
+                        "tool_call_id": call["id"],
+                        "role": "tool",
+                        "name": fn_name,
+                        "content": result,
+                    }
+                )
     finally:
         _in_subagent.active = False
 
@@ -724,19 +768,23 @@ def separator():
 def _format_inline(text):
     """Apply inline markdown formatting: code, bold, italic, strikethrough, links."""
     # inline code first (protect contents from further formatting)
-    parts = re.split(r'(`[^`]+`)', text)
+    parts = re.split(r"(`[^`]+`)", text)
     result = []
     for part in parts:
-        if part.startswith('`') and part.endswith('`'):
+        if part.startswith("`") and part.endswith("`"):
             result.append(f"{YELLOW}{part[1:-1]}{RESET}")
         else:
             p = part
-            p = re.sub(r'\*\*(.+?)\*\*', f'{BOLD}\\1{RESET}', p)
-            p = re.sub(r'__(.+?)__', f'{BOLD}\\1{RESET}', p)
-            p = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', f'{ITALIC}\\1{RESET}', p)
-            p = re.sub(r'(?<!_)_(?!_)(.+?)(?<!_)_(?!_)', f'{ITALIC}\\1{RESET}', p)
-            p = re.sub(r'~~(.+?)~~', f'{STRIKETHROUGH}\\1{RESET}', p)
-            p = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', f'{UNDERLINE}\\1{RESET} {DIM}(\\2){RESET}', p)
+            p = re.sub(r"\*\*(.+?)\*\*", f"{BOLD}\\1{RESET}", p)
+            p = re.sub(r"__(.+?)__", f"{BOLD}\\1{RESET}", p)
+            p = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", f"{ITALIC}\\1{RESET}", p)
+            p = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", f"{ITALIC}\\1{RESET}", p)
+            p = re.sub(r"~~(.+?)~~", f"{STRIKETHROUGH}\\1{RESET}", p)
+            p = re.sub(
+                r"\[([^\]]+)\]\(([^)]+)\)",
+                f"{UNDERLINE}\\1{RESET} {DIM}(\\2){RESET}",
+                p,
+            )
             result.append(p)
     return "".join(result)
 
@@ -772,7 +820,9 @@ class MarkdownRenderer:
                 self.in_code_block = True
                 lang = stripped[3:].strip()
                 label = f" {lang} " if lang else "─"
-                sys.stdout.write(f"  {DIM}┌─{label}{'─' * max(0, 38 - len(label))}┐{RESET}\n")
+                sys.stdout.write(
+                    f"  {DIM}┌─{label}{'─' * max(0, 38 - len(label))}┐{RESET}\n"
+                )
             else:
                 self.in_code_block = False
                 sys.stdout.write(f"  {DIM}└{'─' * 40}┘{RESET}\n")
@@ -785,15 +835,19 @@ class MarkdownRenderer:
             return
 
         # headers
-        m = re.match(r'^(#{1,6})\s+(.*)', line)
+        m = re.match(r"^(#{1,6})\s+(.*)", line)
         if m:
             text = _format_inline(m.group(2))
-            sys.stdout.write(f"{BOLD}{CYAN}{text}{RESET}\n" if len(m.group(1)) <= 2 else f"{BOLD}{text}{RESET}\n")
+            sys.stdout.write(
+                f"{BOLD}{CYAN}{text}{RESET}\n"
+                if len(m.group(1)) <= 2
+                else f"{BOLD}{text}{RESET}\n"
+            )
             sys.stdout.flush()
             return
 
         # horizontal rule
-        if re.match(r'^(-{3,}|\*{3,}|_{3,})\s*$', stripped):
+        if re.match(r"^(-{3,}|\*{3,}|_{3,})\s*$", stripped):
             cols = min(os.get_terminal_size().columns, 60)
             sys.stdout.write(f"  {DIM}{'─' * cols}{RESET}\n")
             sys.stdout.flush()
@@ -801,29 +855,35 @@ class MarkdownRenderer:
 
         # blockquote
         if stripped.startswith("> "):
-            sys.stdout.write(f"  {DIM}▌{RESET} {DIM}{_format_inline(stripped[2:])}{RESET}\n")
+            sys.stdout.write(
+                f"  {DIM}▌{RESET} {DIM}{_format_inline(stripped[2:])}{RESET}\n"
+            )
             sys.stdout.flush()
             return
 
         # task list
-        task = re.match(r'^(\s*)([-*+])\s+\[([ xX])\]\s+(.*)', line)
+        task = re.match(r"^(\s*)([-*+])\s+\[([ xX])\]\s+(.*)", line)
         if task:
             check = f"{GREEN}✓{RESET}" if task.group(3) in "xX" else f"{DIM}○{RESET}"
-            sys.stdout.write(f"{task.group(1)}  {check} {_format_inline(task.group(4))}\n")
+            sys.stdout.write(
+                f"{task.group(1)}  {check} {_format_inline(task.group(4))}\n"
+            )
             sys.stdout.flush()
             return
 
         # unordered list
-        ul = re.match(r'^(\s*)([-*+])\s+(.*)', line)
+        ul = re.match(r"^(\s*)([-*+])\s+(.*)", line)
         if ul:
             sys.stdout.write(f"{ul.group(1)}  • {_format_inline(ul.group(3))}\n")
             sys.stdout.flush()
             return
 
         # ordered list
-        ol = re.match(r'^(\s*)(\d+)[.)]\s+(.*)', line)
+        ol = re.match(r"^(\s*)(\d+)[.)]\s+(.*)", line)
         if ol:
-            sys.stdout.write(f"{ol.group(1)}  {DIM}{ol.group(2)}.{RESET} {_format_inline(ol.group(3))}\n")
+            sys.stdout.write(
+                f"{ol.group(1)}  {DIM}{ol.group(2)}.{RESET} {_format_inline(ol.group(3))}\n"
+            )
             sys.stdout.flush()
             return
 
@@ -873,17 +933,38 @@ def _exec_tool_call(call):
 def main():
     # Prompt history
     history_file = os.path.join(os.path.expanduser("~"), ".picocode_history")
-    try:
-        readline.read_history_file(history_file)
-    except FileNotFoundError:
-        pass
-    readline.set_history_length(1000)
-    atexit.register(readline.write_history_file, history_file)
+    _history: list[str] = []
 
-    print(
-        f"{BOLD}picocode{RESET} | {DIM}{MODEL} (OpenAI) | {os.getcwd()}{RESET}\n"
-    )
-    messages = [{"role": "system", "content": f"Concise coding assistant. cwd: {os.getcwd()}"}]
+    if _has_readline:
+        try:
+            readline.read_history_file(history_file)  # type: ignore[union-attr]
+        except FileNotFoundError:
+            pass
+        readline.set_history_length(1000)  # type: ignore[union-attr]
+        atexit.register(readline.write_history_file, history_file)  # type: ignore[union-attr]
+    else:
+        # Simple file-based history for systems without readline
+        if os.path.exists(history_file):
+            try:
+                with open(history_file) as f:
+                    _history = [line.rstrip("\n") for line in f if line.strip()]
+            except Exception:
+                pass
+
+        def _save_history():
+            try:
+                with open(history_file, "w") as f:
+                    for line in _history[-1000:]:
+                        f.write(line + "\n")
+            except Exception:
+                pass
+
+        atexit.register(_save_history)
+
+    print(f"{BOLD}picocode{RESET} | {DIM}{MODEL} (OpenAI) | {os.getcwd()}{RESET}\n")
+    messages = [
+        {"role": "system", "content": f"Concise coding assistant. cwd: {os.getcwd()}"}
+    ]
 
     while True:
         try:
@@ -895,7 +976,12 @@ def main():
             if user_input in ("/q", "exit"):
                 break
             if user_input == "/c":
-                messages = [{"role": "system", "content": f"Concise coding assistant. cwd: {os.getcwd()}"}]
+                messages = [
+                    {
+                        "role": "system",
+                        "content": f"Concise coding assistant. cwd: {os.getcwd()}",
+                    }
+                ]
                 print(f"{GREEN}⏺ Cleared conversation{RESET}")
                 continue
 
@@ -919,7 +1005,7 @@ def main():
                 if text_content:
                     assistant_msg["content"] = text_content
                 if tool_calls:
-                    assistant_msg["tool_calls"] = tool_calls
+                    assistant_msg["tool_calls"] = tool_calls  # type: ignore[assignment]
                 messages.append(assistant_msg)
 
                 if not tool_results:
